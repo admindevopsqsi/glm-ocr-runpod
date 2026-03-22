@@ -1,6 +1,6 @@
 # GLM-OCR on RunPod Serverless
 
-[![Deploy on RunPod](https://badge.runpod.io/cta/deploy-on-runpod-dark.svg)](https://www.runpod.io/console/hub/duozokker/glm-ocr-runpod)
+[![Runpod](https://api.runpod.io/badge/duozokker/glm-ocr-runpod)](https://console.runpod.io/hub/duozokker/glm-ocr-runpod)
 
 Deploy [GLM-OCR](https://github.com/zai-org/GLM-OCR) (0.9B) as a serverless OCR endpoint on [RunPod](https://www.runpod.io). OpenAI-compatible API, auto-scaling from 0 to 100 workers.
 
