@@ -1,12 +1,12 @@
 # GLM-OCR on RunPod Serverless
 
-Deploy [GLM-OCR](https://github.com/zai-org/GLM-OCR) (0.9B) as a serverless OCR endpoint on [RunPod](https://www.runpod.io) with a single Dockerfile. OpenAI-compatible API, auto-scaling from 0 to 100 workers, ~$0.09 per 1,000 PDF pages.
+Deploy [GLM-OCR](https://github.com/zai-org/GLM-OCR) (0.9B) as a serverless OCR endpoint on [RunPod](https://www.runpod.io) with a single Dockerfile. OpenAI-compatible API, auto-scaling from 0 to 100 workers.
 
 ## Features
 
-- **Fast** — 1.86 PDF pages/sec per worker with Multi-Token Prediction (MTP)
-- **Cheap** — ~17x cheaper than Google Document AI or AWS Textract
-- **Scalable** — RunPod auto-scales 0→100 workers, up to ~670K pages/hour
+- **Fast** — ~0.67 images/sec per worker with Multi-Token Prediction (MTP)
+- **Cheap** — significantly cheaper than Google Document AI or AWS Textract
+- **Scalable** — RunPod auto-scales 0→100 workers
 - **Zero cold-start downloads** — model weights baked into the Docker image
 - **OpenAI-compatible API** — works with the OpenAI SDK, cURL, or any HTTP client
 - **GDPR-ready** — select EU data centers, no data sent to third-party AI providers
@@ -49,7 +49,6 @@ Fork or clone this repo to your GitHub account. RunPod builds the Docker image d
 | Setting | Recommended Value | Notes |
 |---------|------------------|-------|
 | **Endpoint Name** | `glm-ocr` | Any name you like |
-| **Endpoint Type** | **Load Balancer** | Required for bare vLLM HTTP server |
 | **GPU** | RTX A4000 (16 GB) | Cheapest option that fits the 0.9B model |
 | **Active Workers** | 0 | Set to 1 if you need zero cold starts |
 | **Max Workers** | 5 | Adjust based on your volume |
@@ -178,31 +177,40 @@ Benchmarks from the [GLM-OCR paper](https://arxiv.org/html/2603.10910) (single G
 
 | Input Type | Speed | Per Page |
 |------------|-------|----------|
-| PDF pages | 1.86 pages/sec | ~0.54s |
 | Images | 0.67 images/sec | ~1.5s |
+
+> **Note:** The GLM-OCR paper also reports 1.86 PDF pages/sec for full document parsing
+> with the official SDK pipeline (including layout detection via PP-DocLayoutV3). This repo
+> serves only the base model — for full PDF pipeline performance, use the
+> [official glmocr SDK](https://github.com/zai-org/GLM-OCR).
 
 ### Scaling
 
 RunPod auto-scales workers based on incoming requests:
 
-| Workers | PDF pages/sec | Pages/hour |
-|---------|--------------|------------|
-| 1 | 1.86 | ~6,700 |
-| 10 | 18.6 | ~67,000 |
-| 50 | 93 | ~335,000 |
-| 100 | 186 | ~670,000 |
+| Workers | Images/sec | Images/hour |
+|---------|-----------|-------------|
+| 1 | 0.67 | ~2,400 |
+| 10 | 6.7 | ~24,000 |
+| 50 | 33.5 | ~120,000 |
+| 100 | 67 | ~240,000 |
 
 ## Cost
 
 Using RunPod A4000 (16 GB) Flex workers at $0.00016/sec:
 
-| Volume/month | Cost |
-|-------------|------|
-| 10,000 pages | **~$0.86** |
-| 100,000 pages | **~$8.60** |
-| 1,000,000 pages | **~$86** |
+| Volume/month | Cost (compute only) |
+|-------------|---------------------|
+| 10,000 images | **~$2.40** |
+| 100,000 images | **~$24** |
+| 1,000,000 images | **~$240** |
 
 Plus ~$1.05/month for container disk storage.
+
+> **Real-world costs will be higher** than pure compute time. RunPod bills from worker
+> start to stop, including cold start (~5–30s on first request) and idle timeout. For
+> bursty or low-volume workloads, consider setting Active Workers to 1 to avoid cold
+> starts, or batch your requests to maximize worker utilization.
 
 For comparison: Google Document AI and AWS Textract charge ~$1.50 per 1,000 pages.
 

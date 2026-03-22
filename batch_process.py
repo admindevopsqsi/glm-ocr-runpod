@@ -33,8 +33,6 @@ except ImportError:
 
 try:
     import requests
-    from requests.adapters import HTTPAdapter
-    from urllib3.util.retry import Retry
 except ImportError:
     print("Missing dependency: pip install -r requirements.txt")
     sys.exit(1)
@@ -47,19 +45,6 @@ PROMPT_SHORTCUTS = {
     "formula": "Formula Recognition:",
     "table": "Table Recognition:",
 }
-
-
-def make_session(retries: int = 3) -> requests.Session:
-    """Create a requests session with retry logic for transient errors."""
-    session = requests.Session()
-    retry = Retry(
-        total=retries,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["POST"],
-    )
-    session.mount("https://", HTTPAdapter(max_retries=retry))
-    return session
 
 
 def image_to_base64_url(path: Path) -> str:
@@ -171,7 +156,7 @@ def main():
     print(f"Output: {output_dir}")
     print()
 
-    session = make_session()
+    session = requests.Session()
     start = time.time()
     completed = 0
     failed = 0
