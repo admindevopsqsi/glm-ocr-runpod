@@ -12,13 +12,13 @@ import sys
 import threading
 import time
 
-import requests as http_requests  # renamed to avoid clash with runpod
+import requests as http_requests
 import runpod
 
 VLLM_HOST = "http://localhost:8000"
 MODEL_NAME = os.getenv("MODEL_NAME", "zai-org/GLM-OCR")
 GPU_MEMORY_UTILIZATION = os.getenv("GPU_MEMORY_UTILIZATION", "0.95")
-MAX_MODEL_LEN = os.getenv("MAX_MODEL_LEN", "")
+MAX_MODEL_LEN = os.getenv("MAX_MODEL_LEN", "4096")
 STARTUP_TIMEOUT = int(os.getenv("STARTUP_TIMEOUT", "300"))
 
 # Shared state
@@ -35,13 +35,9 @@ def start_vllm_background():
         "--model", MODEL_NAME,
         "--port", "8000",
         "--gpu-memory-utilization", GPU_MEMORY_UTILIZATION,
-        "--trust-remote-code",
-        "--allowed-local-media-path", "/tmp",
-        "--max-model-len", "4096",
+        "--max-model-len", MAX_MODEL_LEN,
+        "--allowed-local-media-path", "/",
     ]
-
-    if MAX_MODEL_LEN:
-        cmd.extend(["--max-model-len", MAX_MODEL_LEN])
 
     print(f"Starting vLLM: {' '.join(cmd)}", flush=True)
     proc = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr)
@@ -68,14 +64,12 @@ def start_vllm_background():
 
 def handler(job):
     """Process a single RunPod job. Waits for vLLM if still starting."""
-    # Wait up to STARTUP_TIMEOUT for vLLM to be ready
     if not vllm_ready.is_set():
         print("Waiting for vLLM to become ready...", flush=True)
         vllm_ready.wait(timeout=STARTUP_TIMEOUT)
 
     if vllm_error:
         return {"error": vllm_error}
-
     if not vllm_ready.is_set():
         return {"error": "vLLM not ready after timeout"}
 
@@ -85,21 +79,13 @@ def handler(job):
     if "openai_route" in job_input:
         route = job_input["openai_route"]
         body = job_input.get("openai_input", {})
-        # Support GET endpoints like /v1/models
-        if not body or route.endswith("/models"):
-            try:
-                resp = http_requests.get(f"{VLLM_HOST}{route}", timeout=30)
-                resp.raise_for_status()
-                return resp.json()
-            except http_requests.RequestException as exc:
-                return {"error": str(exc)}
-    # Format 2: Direct OpenAI body (messages present)
+    # Format 2: Direct OpenAI body
     elif "messages" in job_input:
         route = "/v1/chat/completions"
         body = job_input
         if "model" not in body:
             body["model"] = MODEL_NAME
-    # Format 3: Raw prompt (text completion)
+    # Format 3: Raw prompt
     elif "prompt" in job_input:
         route = "/v1/completions"
         body = job_input

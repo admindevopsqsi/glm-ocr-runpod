@@ -1,10 +1,31 @@
 {
     "tests": [
         {
-            "name": "health_check",
+            "name": "text_recognition_base64",
             "input": {
-                "openai_route": "/v1/models",
-                "openai_input": {}
+                "openai_route": "/v1/chat/completions",
+                "openai_input": {
+                    "model": "zai-org/GLM-OCR",
+                    "max_tokens": 256,
+                    "temperature": 0.01,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAIAAAACUFjqAAAAEElEQVR4nGP4jxcwjEpjAwD6Hirkl4HYkQAAAABJRU5ErkJggg=="
+                                    }
+                                },
+                                {
+                                    "type": "text",
+                                    "text": "Text Recognition:"
+                                }
+                            ]
+                        }
+                    ]
+                }
             },
             "timeout": 900000
         }
