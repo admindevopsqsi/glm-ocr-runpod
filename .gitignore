@@ -17,3 +17,4 @@ ocr_output/
 .ruff_cache/
 .vscode/
 .idea/
+X_POST*.md

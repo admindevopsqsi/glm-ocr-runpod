@@ -178,7 +178,6 @@ python3 smoke_test_service.py \
 - [benchmark_datev.py](/Users/schayan/Dev/GLM-5-OCR-Runpod/benchmark_datev.py)
 - [Dockerfile](/Users/schayan/Dev/GLM-5-OCR-Runpod/Dockerfile)
 - [CHANGELOG.md](/Users/schayan/Dev/GLM-5-OCR-Runpod/CHANGELOG.md)
-- [X_POST_DRAFT.md](/Users/schayan/Dev/GLM-5-OCR-Runpod/X_POST_DRAFT.md)
 
 ## Notes
 
