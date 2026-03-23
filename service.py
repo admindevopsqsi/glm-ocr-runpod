@@ -485,11 +485,9 @@ def health() -> tuple[Response, int] | Response:
 @app.get("/ping")
 def ping() -> tuple[str, int]:
     snapshot = state.snapshot()
-    if snapshot["ready"]:
-        return "", 200
     if snapshot["stage"] == "failed":
         return "", 503
-    return "", 204
+    return "", 200
 
 
 @app.get("/metrics")

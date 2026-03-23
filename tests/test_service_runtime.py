@@ -38,11 +38,11 @@ def test_resolve_runtime_profile_for_24gb_gpu(monkeypatch):
     assert profile["enable_mtp"] is True
 
 
-def test_ping_returns_204_while_initializing(monkeypatch):
+def test_ping_returns_200_while_initializing(monkeypatch):
     service.state.ready = False
     service.state.stage = "starting_vllm"
 
     with service.app.test_client() as client:
         response = client.get("/ping")
 
-    assert response.status_code == 204
+    assert response.status_code == 200

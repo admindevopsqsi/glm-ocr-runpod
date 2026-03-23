@@ -33,8 +33,7 @@ Returns startup phase and readiness. Suitable for load balancer health checks.
 
 RunPod load-balancer health endpoint.
 
-- `200` when ready
-- `204` while initializing
+- `200` while the HTTP process is alive
 - `503` on failed startup
 
 ### `GET /metrics`
@@ -93,7 +92,7 @@ Recommended starting point:
 | Setting | Value |
 |---|---|
 | Endpoint Type | Load Balancing |
-| Port | `8000` |
+| Port | `80` |
 | Health Path | `/ping` |
 | GPU | Supported NVIDIA GPU with at least `16 GB` VRAM |
 | Active Workers | `0` or `1` depending on latency target |
@@ -143,7 +142,7 @@ The image pre-downloads both GLM-OCR and the PP-DocLayout model to reduce boot t
 
 ```bash
 docker run --rm --gpus all \
-  -p 8000:8000 \
+  -p 8000:80 \
   -e HF_TOKEN="$HF_TOKEN" \
   -e GPU_COST_PER_SEC=0.00016 \
   glmocr-runpod

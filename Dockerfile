@@ -7,9 +7,9 @@ ENV HF_HOME=/root/.cache/huggingface
 ENV PYTHONUNBUFFERED=1
 ENV HF_TOKEN=${HF_TOKEN}
 ENV HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
-ENV APP_PORT=8000
-ENV PORT=8000
-ENV PORT_HEALTH=8000
+ENV APP_PORT=80
+ENV PORT=80
+ENV PORT_HEALTH=80
 ENV VLLM_HOST=http://127.0.0.1:8080
 ENV GLMOCR_CONFIG_PATH=/app/glmocr.config.yaml
 ENV GLMOCR_LAYOUT_DEVICE=cpu
@@ -20,6 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl build-essential && \
     rm -rf /var/lib/apt/lists/*
 
+EXPOSE 80
+
 # Install vLLM nightly (pip wheels built for CUDA 12.1, compatible with 12.4)
 RUN pip3 install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
 
@@ -27,7 +29,7 @@ RUN pip3 install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
 RUN pip3 install git+https://github.com/huggingface/transformers.git
 
 # Install GLM-OCR selfhosted stack plus HTTP service dependencies
-RUN pip3 install "glmocr[selfhosted,server]" flask requests pypdf
+RUN pip3 install "glmocr[selfhosted,server]" flask requests pypdf pypdfium2
 
 # Bake OCR and layout model weights into the image to reduce boot time.
 RUN python3 - <<'PY'
