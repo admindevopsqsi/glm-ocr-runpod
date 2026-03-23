@@ -4,6 +4,8 @@ ARG HF_TOKEN=""
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV HF_HOME=/root/.cache/huggingface
+ENV HF_HUB_DOWNLOAD_TIMEOUT=30
+ENV HF_XET_HIGH_PERFORMANCE=1
 ENV PYTHONUNBUFFERED=1
 ENV HF_TOKEN=${HF_TOKEN}
 ENV HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
@@ -29,7 +31,7 @@ RUN pip3 install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
 RUN pip3 install git+https://github.com/huggingface/transformers.git
 
 # Install GLM-OCR selfhosted stack plus HTTP service dependencies
-RUN pip3 install "glmocr[selfhosted,server]" flask requests pypdf pypdfium2
+RUN pip3 install "glmocr[selfhosted,server]" fastapi uvicorn requests pypdf pypdfium2
 
 # Bake OCR and layout model weights into the image to reduce boot time.
 RUN python3 - <<'PY'

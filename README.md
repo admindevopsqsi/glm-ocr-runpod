@@ -4,7 +4,7 @@ Deploy the official self-hosted [GLM-OCR](https://github.com/zai-org/GLM-OCR) pi
 
 - local `vLLM` for the GLM-OCR model
 - the official `glmocr[selfhosted]` pipeline for PDFs, layout detection, tables, and formulas
-- an HTTP service suitable for RunPod Load Balancing
+- a FastAPI HTTP service suitable for RunPod Load Balancing
 - health and performance metrics
 - benchmark tooling for large PDF sets
 
@@ -27,18 +27,23 @@ This repo fixes that by serving the official GLM-OCR self-hosted pipeline over H
 
 ### `GET /health`
 
-Returns startup phase and readiness. Suitable for load balancer health checks.
+Returns startup phase, readiness, runtime profile, and aggregate metrics. Use this for debugging and readiness inspection, not as the RunPod LB health path.
 
 ### `GET /ping`
 
 RunPod load-balancer health endpoint.
 
-- `200` while the HTTP process is alive
+- `204` while the worker is still initializing
+- `200` when the worker is ready to receive traffic
 - `503` on failed startup
 
 ### `GET /metrics`
 
 Returns aggregated request, page, timing, and estimated cost statistics.
+
+### `GET /stats`
+
+Alias for `/metrics`.
 
 ### `POST /ocr/single`
 
@@ -75,11 +80,13 @@ These routes remain available for raw `vLLM` access and debugging.
 
 The serving path is intentionally narrow and split into two modes:
 
-1. start `vLLM`
-2. wait for `/health`
-3. start `glmocr[selfhosted]`
-4. expose `/ocr/single` for fast single-page OCR
-5. expose `/glmocr/parse` for full PDF/layout OCR
+1. start the FastAPI/uvicorn service immediately
+2. return `204` from `/ping` while the worker initializes
+3. launch `vLLM` in the background
+4. initialize `glmocr[selfhosted]`
+5. switch `/ping` to `200`
+6. expose `/ocr/single` for fast single-page OCR
+7. expose `/glmocr/parse` for full PDF/layout OCR
 
 No second OCR provider, no MaaS dependency, no queue worker protocol, no browser-only PDF tricks.
 
@@ -94,16 +101,18 @@ Recommended starting point:
 | Endpoint Type | Load Balancing |
 | Port | `80` |
 | Health Path | `/ping` |
-| GPU | Supported NVIDIA GPU with at least `16 GB` VRAM |
+| GPU | Start with one homogeneous `24 GB` GPU class, widen later |
 | Active Workers | `0` or `1` depending on latency target |
-| Idle Timeout | `60-180s` |
+| Idle Timeout | `120s` |
 | Scaling Mode | Request count |
 | FlashBoot | Enabled |
+| Scaler Value | `1` or `2` |
 
 Tradeoff:
 
 - `Active Workers = 0` is cheapest, but the first request after idle can still wait for boot.
 - `Active Workers = 1` gives better latency but a materially higher monthly floor cost.
+- Do the first validation with one GPU family only. Avoid mixed `15/16/24/48 GB` pools until the service is stable.
 
 ## Environment variables
 
@@ -136,7 +145,7 @@ If you want Hugging Face-authenticated downloads during build:
 docker build --build-arg HF_TOKEN="$HF_TOKEN" -t glmocr-runpod .
 ```
 
-The image pre-downloads both GLM-OCR and the PP-DocLayout model to reduce boot time.
+The image pre-downloads both GLM-OCR and the PP-DocLayout model to reduce boot time. It also enables Hugging Face high-performance transfers when available.
 
 ## Local run
 
@@ -195,6 +204,7 @@ python3 smoke_test_service.py \
 
 ## Notes
 
+- RunPod routes LB traffic only after `/ping` returns `200`. While startup is in progress, this service intentionally returns `204`.
 - `GLMOCR_LAYOUT_DEVICE=cpu` is the default because on a single-GPU machine it usually improves stability by reserving GPU memory for `vLLM`.
 - If you care more about absolute throughput than stability, test `GLMOCR_LAYOUT_DEVICE=cuda`.
 - `HF_TOKEN` is only consumed from environment variables or build args. No Hugging Face secret is stored in Git.

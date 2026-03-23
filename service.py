@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import base64
+import logging
 import os
 import subprocess
 import sys
@@ -5,19 +9,38 @@ import tempfile
 import threading
 import time
 from collections import deque
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import pypdfium2 as pdfium
 import requests
-from flask import Flask, Response, jsonify, request
-from glmocr import GlmOcr
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
+
+try:
+    import pypdfium2 as pdfium
+except ImportError:  # pragma: no cover - depends on local runtime
+    pdfium = None
+
+try:
+    from glmocr import GlmOcr
+except ImportError:  # pragma: no cover - depends on local runtime
+    GlmOcr = None
+
 from prompts import SINGLE_OCR_PROMPT
 
 
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("glmocr-service")
+
+
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
-APP_PORT = int(os.getenv("PORT", os.getenv("APP_PORT", "8000")))
+APP_PORT = int(os.getenv("PORT", os.getenv("APP_PORT", "80")))
 VLLM_HOST = os.getenv("VLLM_HOST", "http://127.0.0.1:8080")
 MODEL_NAME = os.getenv("MODEL_NAME", "zai-org/GLM-OCR")
 SERVED_MODEL_NAME = os.getenv("SERVED_MODEL_NAME", "glm-ocr")
@@ -29,6 +52,7 @@ GLMOCR_LAYOUT_DEVICE = os.getenv("GLMOCR_LAYOUT_DEVICE", "cpu")
 HEALTH_POLL_INTERVAL = float(os.getenv("HEALTH_POLL_INTERVAL", "1.0"))
 SINGLE_OCR_PDF_DPI = int(os.getenv("SINGLE_OCR_PDF_DPI", "180"))
 MIN_GPU_MEMORY_GB = float(os.getenv("MIN_GPU_MEMORY_GB", "16"))
+UVICORN_LOG_LEVEL = os.getenv("UVICORN_LOG_LEVEL", "info")
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -84,6 +108,10 @@ class Metrics:
                 self.total_cost_usd += sample.cost_usd
                 self.last_samples.append(sample)
 
+    def is_vllm_ready(self) -> bool:
+        with self.lock:
+            return self.vllm_ready_at is not None
+
     def snapshot(self, stage: str, ready: bool) -> dict[str, Any]:
         with self.lock:
             avg_doc_seconds = self.total_request_seconds / self.total_documents if self.total_documents else None
@@ -134,10 +162,11 @@ class ServiceState:
         self.stage = "booting"
         self.ready = False
         self.vllm_process: subprocess.Popen[str] | None = None
-        self.parser: GlmOcr | None = None
+        self.parser: Any | None = None
         self.metrics = Metrics()
         self.error: str | None = None
         self.runtime_profile: dict[str, Any] = {}
+        self.startup_thread: threading.Thread | None = None
         self.lock = threading.Lock()
 
     def set_stage(self, stage: str) -> None:
@@ -160,6 +189,9 @@ class ServiceState:
         with self.lock:
             self.runtime_profile = runtime_profile
 
+    def vllm_ready(self) -> bool:
+        return self.metrics.is_vllm_ready()
+
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             data = self.metrics.snapshot(self.stage, self.ready)
@@ -171,7 +203,6 @@ class ServiceState:
 
 
 state = ServiceState()
-app = Flask(__name__)
 
 
 def detect_gpu_info() -> tuple[str | None, float | None]:
@@ -316,11 +347,15 @@ def wait_for_vllm() -> None:
 
 def startup_worker() -> None:
     try:
+        if GlmOcr is None:
+            raise RuntimeError("Missing dependency 'glmocr'. Install glmocr[selfhosted,server] in the worker image.")
+
         runtime_profile = resolve_runtime_profile()
         state.set_runtime_profile(runtime_profile)
+
         state.set_stage("starting_vllm")
         cmd = build_vllm_command(runtime_profile)
-        print(f"Starting vLLM: {' '.join(cmd)}", flush=True)
+        logger.info("Starting vLLM: %s", " ".join(cmd))
         state.vllm_process = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr, text=True)
         wait_for_vllm()
 
@@ -333,10 +368,19 @@ def startup_worker() -> None:
         )
         state.metrics.mark_pipeline_ready()
         state.mark_ready()
-        print("GLM-OCR service is ready", flush=True)
+        logger.info("GLM-OCR service is ready")
     except Exception as exc:
         state.set_error(str(exc))
-        print(f"Startup failed: {exc}", flush=True)
+        logger.exception("Startup failed")
+
+
+def ensure_startup_thread() -> None:
+    with state.lock:
+        thread = state.startup_thread
+        if thread is not None and thread.is_alive():
+            return
+        state.startup_thread = threading.Thread(target=startup_worker, daemon=True, name="glmocr-startup")
+        state.startup_thread.start()
 
 
 def page_count_from_result(result: Any) -> int:
@@ -365,10 +409,7 @@ def save_result_if_requested(result: Any, output_dir: str | None, save_layout_vi
     if not output_dir:
         return
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    result.save(
-        output_dir=output_dir,
-        save_layout_visualization=save_layout_visualization,
-    )
+    result.save(output_dir=output_dir, save_layout_visualization=save_layout_visualization)
 
 
 def estimate_cost(elapsed_seconds: float) -> float:
@@ -397,12 +438,13 @@ def image_input_to_url(image: str) -> str:
         ".tif": "image/tiff",
     }.get(suffix, "image/png")
     data = path.read_bytes()
-    import base64
-
     return f"data:{mime};base64,{base64.b64encode(data).decode()}"
 
 
 def render_pdf_page_to_data_url(document: str, page: int, dpi: int = SINGLE_OCR_PDF_DPI) -> str:
+    if pdfium is None:
+        raise RuntimeError("Missing dependency 'pypdfium2'. Install it in the worker image.")
+
     path = local_path_from_input(document)
     pdf = pdfium.PdfDocument(str(path))
     try:
@@ -455,71 +497,159 @@ def perform_single_ocr(image_url: str, prompt: str, max_tokens: int) -> dict[str
     }
 
 
-def proxy_openai_request(route: str) -> Response:
-    url = f"{VLLM_HOST}{route}"
+def read_json_body(request: Request) -> dict[str, Any]:
     try:
-        response = requests.request(
-            method=request.method,
-            url=url,
-            headers={k: v for k, v in request.headers.items() if k.lower() != "host"},
-            data=request.get_data(),
-            params=request.args,
-            timeout=REQUEST_TIMEOUT,
-        )
-        excluded_headers = {"content-encoding", "content-length", "transfer-encoding", "connection"}
-        headers = [(name, value) for name, value in response.raw.headers.items() if name.lower() not in excluded_headers]
-        return Response(response.content, response.status_code, headers)
-    except requests.RequestException as exc:
-        return jsonify({"error": str(exc)}), 502
+        return request.state.json_payload  # type: ignore[attr-defined]
+    except AttributeError:
+        pass
+    return {}
+
+
+def not_ready_response(require_parser: bool = True) -> JSONResponse:
+    snapshot = state.snapshot()
+    if require_parser:
+        return JSONResponse(snapshot, status_code=503)
+    if not state.vllm_ready():
+        return JSONResponse(snapshot, status_code=503)
+    return JSONResponse(snapshot, status_code=503)
+
+
+def shutdown() -> None:
+    parser = state.parser
+    if parser is not None:
+        try:
+            parser.close()
+        except Exception:  # pragma: no cover - best effort cleanup
+            logger.debug("Failed to close GLM-OCR parser cleanly", exc_info=True)
+
+    process = state.vllm_process
+    if process is not None and process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:  # pragma: no cover - best effort cleanup
+            process.kill()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    ensure_startup_thread()
+    yield
+    shutdown()
+
+
+app = FastAPI(title="GLM-OCR RunPod Service", version="0.3.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def capture_json_body(request: Request, call_next):
+    if request.headers.get("content-type", "").startswith("application/json"):
+        try:
+            request.state.json_payload = await request.json()
+        except Exception:
+            request.state.json_payload = {}
+    response = await call_next(request)
+    return response
+
+
+@app.get("/")
+def root() -> dict[str, Any]:
+    snapshot = state.snapshot()
+    return {
+        "service": "glmocr-runpod",
+        "stage": snapshot["stage"],
+        "ready": snapshot["ready"],
+        "endpoints": {
+            "ping": "/ping",
+            "health": "/health",
+            "metrics": "/metrics",
+            "stats": "/stats",
+            "single": "/ocr/single",
+            "parse": "/glmocr/parse",
+            "openai_models": "/openai/v1/models",
+            "openai_chat_completions": "/openai/v1/chat/completions",
+        },
+    }
 
 
 @app.get("/health")
 @app.get("/ready")
-def health() -> tuple[Response, int] | Response:
+def health() -> JSONResponse:
     snapshot = state.snapshot()
     if snapshot["ready"]:
-        return jsonify(snapshot)
-    return jsonify(snapshot), 503
+        return JSONResponse(snapshot, status_code=200)
+    return JSONResponse(snapshot, status_code=503)
 
 
 @app.get("/ping")
-def ping() -> tuple[str, int]:
+def ping() -> Response:
     snapshot = state.snapshot()
+    if snapshot["ready"]:
+        return JSONResponse({"status": "healthy"}, status_code=200)
     if snapshot["stage"] == "failed":
-        return "", 503
-    return "", 200
+        return JSONResponse({"status": "failed", "error": snapshot.get("error")}, status_code=503)
+    return Response(status_code=204)
 
 
 @app.get("/metrics")
-def metrics() -> Response:
-    return jsonify(state.snapshot())
+@app.get("/stats")
+def metrics() -> JSONResponse:
+    return JSONResponse(state.snapshot(), status_code=200)
+
+
+def proxy_openai_request(request: Request, route: str) -> Response:
+    if not state.vllm_ready():
+        return JSONResponse({"error": "vLLM is not ready yet."}, status_code=503)
+
+    url = f"{VLLM_HOST}{route}"
+    headers = {k: v for k, v in request.headers.items() if k.lower() not in {"host", "content-length"}}
+    body = getattr(request.state, "json_payload", None)
+    data = None if body is not None else None
+    if body is None:
+        data = request._body if hasattr(request, "_body") else None  # pragma: no cover
+
+    try:
+        response = requests.request(
+            method=request.method,
+            url=url,
+            headers=headers,
+            json=body,
+            data=data,
+            params=request.query_params,
+            timeout=REQUEST_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+    excluded_headers = {"content-encoding", "content-length", "transfer-encoding", "connection"}
+    filtered_headers = {k: v for k, v in response.headers.items() if k.lower() not in excluded_headers}
+    return Response(content=response.content, status_code=response.status_code, headers=filtered_headers)
 
 
 @app.get("/openai/v1/models")
-def openai_models() -> Response:
-    return proxy_openai_request("/v1/models")
+async def openai_models(request: Request) -> Response:
+    return proxy_openai_request(request, "/v1/models")
 
 
 @app.post("/openai/v1/chat/completions")
-def openai_chat_completions() -> Response:
-    return proxy_openai_request("/v1/chat/completions")
+async def openai_chat_completions(request: Request) -> Response:
+    return proxy_openai_request(request, "/v1/chat/completions")
 
 
 @app.post("/ocr/single")
-def ocr_single() -> tuple[Response, int] | Response:
-    if not state.ready:
-        return jsonify(state.snapshot()), 503
+async def ocr_single(request: Request) -> Response:
+    if not state.vllm_ready():
+        return not_ready_response(require_parser=False)
 
-    payload = request.get_json(silent=True) or {}
+    payload = read_json_body(request)
     prompt = payload.get("prompt") or SINGLE_OCR_PROMPT
     max_tokens = int(payload.get("max_tokens", 4096))
     page = int(payload.get("page", 1))
-
     image = payload.get("image")
     document = payload.get("document")
 
     if not image and not document:
-        return jsonify({"error": "Expected 'image' or 'document' in request body."}), 400
+        return JSONResponse({"error": "Expected 'image' or 'document' in request body."}, status_code=400)
 
     try:
         if image:
@@ -533,17 +663,18 @@ def ocr_single() -> tuple[Response, int] | Response:
         result["source"] = source
         result["mode"] = "single"
         result["prompt"] = prompt
-        return jsonify(result)
+        return JSONResponse(result, status_code=200)
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        logger.exception("Single OCR failed")
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 @app.post("/glmocr/parse")
-def glmocr_parse() -> tuple[Response, int] | Response:
+async def glmocr_parse(request: Request) -> Response:
     if not state.ready or state.parser is None:
-        return jsonify(state.snapshot()), 503
+        return not_ready_response()
 
-    payload = request.get_json(silent=True) or {}
+    payload = read_json_body(request)
     documents = payload.get("documents") or payload.get("images")
     if not documents:
         single = payload.get("document") or payload.get("image")
@@ -551,7 +682,7 @@ def glmocr_parse() -> tuple[Response, int] | Response:
     documents = [document for document in documents if document]
 
     if not documents:
-        return jsonify({"error": "Expected 'document' or 'documents' in request body."}), 400
+        return JSONResponse({"error": "Expected 'document' or 'documents' in request body."}, status_code=400)
 
     save_layout_visualization = bool(payload.get("save_layout_visualization", False))
     output_dir = payload.get("output_dir")
@@ -563,10 +694,7 @@ def glmocr_parse() -> tuple[Response, int] | Response:
     try:
         for document in documents:
             document_started = time.perf_counter()
-            result = state.parser.parse(
-                document,
-                save_layout_visualization=save_layout_visualization,
-            )
+            result = state.parser.parse(document, save_layout_visualization=save_layout_visualization)
             document_elapsed = time.perf_counter() - document_started
             if output_dir:
                 save_result_if_requested(result, output_dir, save_layout_visualization)
@@ -576,14 +704,15 @@ def glmocr_parse() -> tuple[Response, int] | Response:
                 parsed.pop("json_result", None)
             parsed_documents.append(parsed)
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        logger.exception("Document parse failed")
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
     request_elapsed = time.perf_counter() - request_started
     state.metrics.record_request(parsed_documents, request_elapsed)
 
     total_pages = sum(document["pages"] for document in parsed_documents)
     total_cost = sum(document["estimated_cost_usd"] for document in parsed_documents)
-    return jsonify(
+    return JSONResponse(
         {
             "documents": parsed_documents,
             "summary": {
@@ -598,14 +727,15 @@ def glmocr_parse() -> tuple[Response, int] | Response:
                 if total_pages > 0
                 else None,
             },
-        }
+        },
+        status_code=200,
     )
 
 
 @app.post("/warmup")
-def warmup() -> tuple[Response, int] | Response:
-    if not state.ready:
-        return jsonify(state.snapshot()), 503
+async def warmup() -> Response:
+    if not state.ready or state.parser is None:
+        return not_ready_response()
 
     tiny_png = (
         "data:image/png;base64,"
@@ -614,32 +744,11 @@ def warmup() -> tuple[Response, int] | Response:
     with tempfile.TemporaryDirectory(prefix="glmocr_warmup_") as output_dir:
         result = state.parser.parse(tiny_png, save_layout_visualization=False)
         save_result_if_requested(result, output_dir, False)
-    return jsonify({"status": "ok"})
-
-
-def shutdown() -> None:
-    parser = state.parser
-    if parser is not None:
-        try:
-            parser.close()
-        except Exception:
-            pass
-
-    process = state.vllm_process
-    if process is not None and process.poll() is None:
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
+    return JSONResponse({"status": "ok"}, status_code=200)
 
 
 def main() -> None:
-    threading.Thread(target=startup_worker, daemon=True).start()
-    try:
-        app.run(host=APP_HOST, port=APP_PORT)
-    finally:
-        shutdown()
+    uvicorn.run(app, host=APP_HOST, port=APP_PORT, log_level=UVICORN_LOG_LEVEL)
 
 
 if __name__ == "__main__":

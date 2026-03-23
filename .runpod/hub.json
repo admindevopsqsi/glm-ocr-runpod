@@ -1,6 +1,6 @@
 {
     "title": "GLM-OCR Full Pipeline",
-    "description": "Self-hosted GLM-OCR on RunPod with a dedicated single-page OCR route, a full PDF/layout OCR route, health/metrics endpoints, and model preloading for faster startup.",
+    "description": "Self-hosted GLM-OCR on RunPod with FastAPI, a dedicated single-page OCR route, a full PDF/layout OCR route, health/metrics endpoints, and model preloading for faster startup.",
     "type": "serverless",
     "category": "image",
     "config": {
@@ -36,8 +36,8 @@
             "input": {
                 "type": "string",
                 "name": "GPU Memory Utilization",
-                "description": "Fraction of GPU memory to use (0.0 - 1.0)",
-                "default": "0.95",
+                "description": "Fraction of GPU memory to use (leave empty for automatic VRAM-based defaults)",
+                "default": "",
                 "advanced": true
             }
         },
@@ -52,12 +52,42 @@
             }
         },
         {
+            "key": "MAX_NUM_SEQS",
+            "input": {
+                "type": "string",
+                "name": "Max Concurrent Seqs",
+                "description": "Optional vLLM concurrency cap (leave empty for automatic VRAM-based defaults)",
+                "default": "",
+                "advanced": true
+            }
+        },
+        {
+            "key": "ENABLE_MTP",
+            "input": {
+                "type": "string",
+                "name": "Enable MTP",
+                "description": "Leave empty for automatic GPU-based behavior, or set true/false explicitly",
+                "default": "",
+                "advanced": true
+            }
+        },
+        {
             "key": "GLMOCR_LAYOUT_DEVICE",
             "input": {
                 "type": "string",
                 "name": "Layout Device",
                 "description": "Use cpu to keep GPU RAM focused on OCR inference",
                 "default": "cpu",
+                "advanced": true
+            }
+        },
+        {
+            "key": "MIN_GPU_MEMORY_GB",
+            "input": {
+                "type": "string",
+                "name": "Minimum GPU Memory (GB)",
+                "description": "Fail fast when workers land on GPUs below this VRAM threshold",
+                "default": "16",
                 "advanced": true
             }
         }

@@ -39,9 +39,19 @@ def request_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def default_base_url() -> str:
+    explicit = os.getenv("GLMOCR_BASE_URL")
+    if explicit:
+        return explicit
+    endpoint_id = os.getenv("RUNPOD_ENDPOINT_ID")
+    if endpoint_id:
+        return f"https://{endpoint_id}.api.runpod.ai"
+    return "http://127.0.0.1:8000"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke-test the GLM-OCR service")
-    parser.add_argument("--base-url", default=os.getenv("GLMOCR_BASE_URL", "http://127.0.0.1:8000"))
+    parser.add_argument("--base-url", default=default_base_url())
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--single-image", default=DEFAULT_SINGLE_IMAGE)
     parser.add_argument("--document")

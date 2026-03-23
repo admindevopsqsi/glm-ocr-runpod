@@ -12,8 +12,8 @@ Usage:
 
 Environment (.env or exported):
   GLMOCR_BASE_URL     - Direct base URL to the service
-  RUNPOD_API_KEY      - Optional legacy RunPod API key
-  RUNPOD_ENDPOINT_ID  - Optional legacy RunPod endpoint ID
+  RUNPOD_API_KEY      - Optional RunPod API key
+  RUNPOD_ENDPOINT_ID  - Optional RunPod Load Balancer endpoint ID
 """
 
 import argparse
@@ -65,10 +65,10 @@ def image_to_base64_url(path: Path) -> str:
 
 
 def process_image(
-    session: requests.Session,
     base_url: str,
     image_path: Path,
     prompt: str,
+    api_key: str | None,
     timeout: int = 300,
 ) -> dict:
     """Send a single image to RunPod and return the result."""
@@ -80,8 +80,10 @@ def process_image(
 
     url = f"{base_url.rstrip('/')}/ocr/single"
     headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
-    resp = session.post(url, json=payload, headers=headers, timeout=timeout)
+    resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
     resp.raise_for_status()
     result = resp.json()
 
@@ -113,7 +115,7 @@ def main():
 
     base_url = args.base_url
     if not base_url and args.api_key and args.endpoint_id:
-        base_url = f"https://api.runpod.ai/v2/{args.endpoint_id}"
+        base_url = f"https://{args.endpoint_id}.api.runpod.ai"
     if not base_url:
         print("Error: GLMOCR_BASE_URL or RUNPOD_API_KEY + RUNPOD_ENDPOINT_ID required")
         sys.exit(1)
@@ -144,7 +146,6 @@ def main():
     print(f"Output: {output_dir}")
     print()
 
-    session = requests.Session()
     start = time.time()
     completed = 0
     failed = 0
@@ -153,10 +154,10 @@ def main():
         futures = {
             pool.submit(
                 process_image,
-                session,
                 base_url,
                 f,
                 prompt,
+                args.api_key,
             ): f
             for f in files
         }
