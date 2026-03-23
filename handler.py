@@ -35,7 +35,9 @@ def start_vllm_background():
         "--model", MODEL_NAME,
         "--port", "8000",
         "--gpu-memory-utilization", GPU_MEMORY_UTILIZATION,
-        "--speculative-config", '{"method": "mtp", "num_speculative_tokens": 1}',
+        "--trust-remote-code",
+        "--allowed-local-media-path", "/tmp",
+        "--max-model-len", "4096",
     ]
 
     if MAX_MODEL_LEN:
@@ -83,6 +85,14 @@ def handler(job):
     if "openai_route" in job_input:
         route = job_input["openai_route"]
         body = job_input.get("openai_input", {})
+        # Support GET endpoints like /v1/models
+        if not body or route.endswith("/models"):
+            try:
+                resp = http_requests.get(f"{VLLM_HOST}{route}", timeout=30)
+                resp.raise_for_status()
+                return resp.json()
+            except http_requests.RequestException as exc:
+                return {"error": str(exc)}
     # Format 2: Direct OpenAI body (messages present)
     elif "messages" in job_input:
         route = "/v1/chat/completions"

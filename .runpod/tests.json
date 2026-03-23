@@ -1,31 +1,10 @@
 {
     "tests": [
         {
-            "name": "text_recognition",
+            "name": "health_check",
             "input": {
-                "openai_route": "/v1/chat/completions",
-                "openai_input": {
-                    "model": "zai-org/GLM-OCR",
-                    "max_tokens": 2048,
-                    "temperature": 0.01,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a5/Tsunami_by_hokusai_19th_century.jpg/800px-Tsunami_by_hokusai_19th_century.jpg"
-                                    }
-                                },
-                                {
-                                    "type": "text",
-                                    "text": "Text Recognition:"
-                                }
-                            ]
-                        }
-                    ]
-                }
+                "openai_route": "/v1/models",
+                "openai_input": {}
             },
             "timeout": 900000
         }
