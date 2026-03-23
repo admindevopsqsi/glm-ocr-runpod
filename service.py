@@ -17,7 +17,7 @@ from prompts import SINGLE_OCR_PROMPT
 
 
 APP_HOST = os.getenv("APP_HOST", "0.0.0.0")
-APP_PORT = int(os.getenv("APP_PORT", "8000"))
+APP_PORT = int(os.getenv("PORT", os.getenv("APP_PORT", "8000")))
 VLLM_HOST = os.getenv("VLLM_HOST", "http://127.0.0.1:8080")
 MODEL_NAME = os.getenv("MODEL_NAME", "zai-org/GLM-OCR")
 SERVED_MODEL_NAME = os.getenv("SERVED_MODEL_NAME", "glm-ocr")
@@ -28,6 +28,7 @@ GLMOCR_CONFIG_PATH = os.getenv("GLMOCR_CONFIG_PATH", "/app/glmocr.config.yaml")
 GLMOCR_LAYOUT_DEVICE = os.getenv("GLMOCR_LAYOUT_DEVICE", "cpu")
 HEALTH_POLL_INTERVAL = float(os.getenv("HEALTH_POLL_INTERVAL", "1.0"))
 SINGLE_OCR_PDF_DPI = int(os.getenv("SINGLE_OCR_PDF_DPI", "180"))
+MIN_GPU_MEMORY_GB = float(os.getenv("MIN_GPU_MEMORY_GB", "16"))
 
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -136,6 +137,7 @@ class ServiceState:
         self.parser: GlmOcr | None = None
         self.metrics = Metrics()
         self.error: str | None = None
+        self.runtime_profile: dict[str, Any] = {}
         self.lock = threading.Lock()
 
     def set_stage(self, stage: str) -> None:
@@ -154,9 +156,15 @@ class ServiceState:
             self.ready = True
             self.error = None
 
+    def set_runtime_profile(self, runtime_profile: dict[str, Any]) -> None:
+        with self.lock:
+            self.runtime_profile = runtime_profile
+
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
             data = self.metrics.snapshot(self.stage, self.ready)
+            if self.runtime_profile:
+                data["runtime"] = self.runtime_profile
             if self.error:
                 data["error"] = self.error
             return data
@@ -166,7 +174,89 @@ state = ServiceState()
 app = Flask(__name__)
 
 
-def build_vllm_command() -> list[str]:
+def detect_gpu_info() -> tuple[str | None, float | None]:
+    try:
+        output = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=name,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None, None
+
+    if not output:
+        return None, None
+
+    first_line = output.splitlines()[0]
+    name, _, memory = first_line.partition(",")
+    if not memory:
+        return name.strip() or None, None
+    try:
+        return name.strip() or None, round(float(memory.strip()) / 1024, 2)
+    except ValueError:
+        return name.strip() or None, None
+
+
+def resolve_runtime_profile() -> dict[str, Any]:
+    gpu_name, gpu_memory_gb = detect_gpu_info()
+    env_gpu_mem = os.getenv("GPU_MEMORY_UTILIZATION")
+    env_max_len = os.getenv("MAX_MODEL_LEN")
+    env_max_num_seqs = os.getenv("MAX_NUM_SEQS")
+    env_enable_mtp = os.getenv("ENABLE_MTP")
+
+    gpu_memory_utilization = env_gpu_mem
+    max_model_len = env_max_len
+    max_num_seqs = env_max_num_seqs
+    enable_mtp = env_flag("ENABLE_MTP", gpu_memory_gb is None or gpu_memory_gb >= 24)
+    notes: list[str] = []
+
+    if gpu_memory_gb is not None and gpu_memory_gb < MIN_GPU_MEMORY_GB:
+        raise RuntimeError(
+            f"Detected GPU '{gpu_name or 'unknown'}' with {gpu_memory_gb:.2f} GB VRAM. "
+            f"This image is configured for >= {MIN_GPU_MEMORY_GB:.0f} GB GPUs."
+        )
+
+    if gpu_memory_gb is not None:
+        if gpu_memory_gb < 24:
+            gpu_memory_utilization = gpu_memory_utilization or "0.88"
+            max_model_len = max_model_len or "4096"
+            max_num_seqs = max_num_seqs or "1"
+            if env_enable_mtp is None:
+                enable_mtp = False
+            notes.append("Using the conservative 16 GB profile.")
+        elif gpu_memory_gb < 32:
+            gpu_memory_utilization = gpu_memory_utilization or "0.9"
+            max_model_len = max_model_len or "8192"
+            max_num_seqs = max_num_seqs or "2"
+            notes.append("Using the balanced 24 GB profile.")
+        else:
+            gpu_memory_utilization = gpu_memory_utilization or "0.95"
+            max_model_len = max_model_len or "16384"
+            max_num_seqs = max_num_seqs or "2"
+            notes.append("Using the high-memory 32 GB+ profile.")
+    else:
+        gpu_memory_utilization = gpu_memory_utilization or "0.9"
+        max_model_len = max_model_len or "8192"
+        notes.append("GPU VRAM could not be detected; using safe defaults.")
+
+    return {
+        "gpu_name": gpu_name,
+        "gpu_memory_gb": gpu_memory_gb,
+        "gpu_memory_utilization": gpu_memory_utilization,
+        "max_model_len": max_model_len,
+        "max_num_seqs": max_num_seqs,
+        "enable_mtp": enable_mtp,
+        "layout_device": GLMOCR_LAYOUT_DEVICE,
+        "min_gpu_memory_gb": MIN_GPU_MEMORY_GB,
+        "notes": notes,
+    }
+
+
+def build_vllm_command(runtime_profile: dict[str, Any]) -> list[str]:
     cmd = [
         sys.executable,
         "-m",
@@ -178,9 +268,9 @@ def build_vllm_command() -> list[str]:
         "--port",
         "8080",
         "--gpu-memory-utilization",
-        os.getenv("GPU_MEMORY_UTILIZATION", "0.95"),
+        str(runtime_profile["gpu_memory_utilization"]),
         "--max-model-len",
-        os.getenv("MAX_MODEL_LEN", "16384"),
+        str(runtime_profile["max_model_len"]),
         "--allowed-local-media-path",
         "/",
     ]
@@ -188,13 +278,13 @@ def build_vllm_command() -> list[str]:
     if env_flag("TRUST_REMOTE_CODE", True):
         cmd.append("--trust-remote-code")
 
-    if env_flag("ENABLE_MTP", True):
+    if runtime_profile["enable_mtp"]:
         cmd.extend(["--speculative-config.method", "mtp"])
         cmd.extend(["--speculative-config.num_speculative_tokens", os.getenv("NUM_SPECULATIVE_TOKENS", "1")])
 
-    max_num_seqs = os.getenv("MAX_NUM_SEQS")
+    max_num_seqs = runtime_profile.get("max_num_seqs")
     if max_num_seqs:
-        cmd.extend(["--max-num-seqs", max_num_seqs])
+        cmd.extend(["--max-num-seqs", str(max_num_seqs)])
 
     limit_mm_per_prompt = os.getenv("LIMIT_MM_PER_PROMPT")
     if limit_mm_per_prompt:
@@ -226,8 +316,10 @@ def wait_for_vllm() -> None:
 
 def startup_worker() -> None:
     try:
+        runtime_profile = resolve_runtime_profile()
+        state.set_runtime_profile(runtime_profile)
         state.set_stage("starting_vllm")
-        cmd = build_vllm_command()
+        cmd = build_vllm_command(runtime_profile)
         print(f"Starting vLLM: {' '.join(cmd)}", flush=True)
         state.vllm_process = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr, text=True)
         wait_for_vllm()
@@ -388,6 +480,16 @@ def health() -> tuple[Response, int] | Response:
     if snapshot["ready"]:
         return jsonify(snapshot)
     return jsonify(snapshot), 503
+
+
+@app.get("/ping")
+def ping() -> tuple[str, int]:
+    snapshot = state.snapshot()
+    if snapshot["ready"]:
+        return "", 200
+    if snapshot["stage"] == "failed":
+        return "", 503
+    return "", 204
 
 
 @app.get("/metrics")

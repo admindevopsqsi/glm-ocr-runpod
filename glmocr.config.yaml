@@ -63,5 +63,4 @@ pipeline:
     threshold: 0.3
     batch_size: 1
     workers: 1
-    cuda_visible_devices: "0"
     layout_nms: true

@@ -29,6 +29,14 @@ This repo fixes that by serving the official GLM-OCR self-hosted pipeline over H
 
 Returns startup phase and readiness. Suitable for load balancer health checks.
 
+### `GET /ping`
+
+RunPod load-balancer health endpoint.
+
+- `200` when ready
+- `204` while initializing
+- `503` on failed startup
+
 ### `GET /metrics`
 
 Returns aggregated request, page, timing, and estimated cost statistics.
@@ -86,8 +94,8 @@ Recommended starting point:
 |---|---|
 | Endpoint Type | Load Balancing |
 | Port | `8000` |
-| Health Path | `/health` |
-| GPU | A4000 16 GB or L4 |
+| Health Path | `/ping` |
+| GPU | Supported NVIDIA GPU with at least `16 GB` VRAM |
 | Active Workers | `0` or `1` depending on latency target |
 | Idle Timeout | `60-180s` |
 | Scaling Mode | Request count |
@@ -106,13 +114,20 @@ These are the most important runtime settings:
 |---|---|---|
 | `MODEL_NAME` | `zai-org/GLM-OCR` | GLM-OCR model |
 | `SERVED_MODEL_NAME` | `glm-ocr` | Model name exposed through `vLLM` |
-| `GPU_MEMORY_UTILIZATION` | `0.95` | vLLM memory fraction |
-| `MAX_MODEL_LEN` | `16384` | vLLM max model length |
-| `MAX_NUM_SEQS` | unset | Optional vLLM concurrency cap |
-| `SPECULATIVE_CONFIG` | `{"method":"mtp","num_speculative_tokens":1}` | Enables GLM MTP |
+| `GPU_MEMORY_UTILIZATION` | auto | vLLM memory fraction |
+| `MAX_MODEL_LEN` | auto | vLLM max model length |
+| `MAX_NUM_SEQS` | auto | vLLM concurrency cap |
+| `ENABLE_MTP` | auto | Enables GLM MTP on larger GPUs by default |
 | `GLMOCR_LAYOUT_DEVICE` | `cpu` | Keep GPU free for OCR inference |
+| `MIN_GPU_MEMORY_GB` | `16` | Fail fast on GPUs that are too small |
 | `GPU_COST_PER_SEC` | `0.00016` | Used for cost estimation |
 | `HF_TOKEN` | unset | Optional Hugging Face token for faster/more reliable downloads |
+
+Runtime defaults are chosen automatically from detected VRAM:
+
+- `16-23 GB`: conservative profile, `MAX_MODEL_LEN=4096`, `MAX_NUM_SEQS=1`, `ENABLE_MTP=false`
+- `24-31 GB`: balanced profile, `MAX_MODEL_LEN=8192`, `MAX_NUM_SEQS=2`
+- `32+ GB`: high-memory profile, `MAX_MODEL_LEN=16384`, `MAX_NUM_SEQS=2`
 
 ## Docker build
 
@@ -183,4 +198,5 @@ python3 smoke_test_service.py \
 
 - `GLMOCR_LAYOUT_DEVICE=cpu` is the default because on a single-GPU machine it usually improves stability by reserving GPU memory for `vLLM`.
 - If you care more about absolute throughput than stability, test `GLMOCR_LAYOUT_DEVICE=cuda`.
+- `HF_TOKEN` is only consumed from environment variables or build args. No Hugging Face secret is stored in Git.
 - The cost numbers in `/metrics` and `benchmark_datev.py` are estimates from measured processing time and your configured `GPU_COST_PER_SEC`. They do not include idle time or RunPod control-plane overhead.

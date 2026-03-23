@@ -20,8 +20,10 @@ def count_pdf_pages(path: Path) -> int:
 
 def benchmark_document(base_url: str, path: Path, timeout: int, include_results: bool) -> dict:
     started = time.perf_counter()
+    headers = request_headers()
     response = requests.post(
         f"{base_url.rstrip('/')}/glmocr/parse",
+        headers=headers,
         json={
             "document": str(path),
             "include_results": include_results,
@@ -50,16 +52,26 @@ def benchmark_document(base_url: str, path: Path, timeout: int, include_results:
 def wait_until_ready(base_url: str, timeout: int) -> dict:
     deadline = time.time() + timeout
     last_payload = {}
+    headers = request_headers()
     while time.time() < deadline:
         try:
-            response = requests.get(f"{base_url.rstrip('/')}/health", timeout=10)
-            last_payload = response.json()
-            if response.status_code == 200 and last_payload.get("ready"):
-                return last_payload
+            ping = requests.get(f"{base_url.rstrip('/')}/ping", headers=headers, timeout=10)
+            if ping.status_code == 200:
+                response = requests.get(f"{base_url.rstrip('/')}/health", headers=headers, timeout=10)
+                last_payload = response.json()
+                if response.status_code == 200 and last_payload.get("ready"):
+                    return last_payload
         except requests.RequestException:
             pass
         time.sleep(2)
     raise TimeoutError(f"Service at {base_url} did not become ready within {timeout}s. Last payload: {last_payload}")
+
+
+def request_headers() -> dict[str, str]:
+    token = os.getenv("RUNPOD_API_KEY") or os.getenv("BEARER_TOKEN")
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
 
 
 def build_summary(results: list[dict]) -> dict:

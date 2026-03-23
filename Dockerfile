@@ -8,6 +8,8 @@ ENV PYTHONUNBUFFERED=1
 ENV HF_TOKEN=${HF_TOKEN}
 ENV HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
 ENV APP_PORT=8000
+ENV PORT=8000
+ENV PORT_HEALTH=8000
 ENV VLLM_HOST=http://127.0.0.1:8080
 ENV GLMOCR_CONFIG_PATH=/app/glmocr.config.yaml
 ENV GLMOCR_LAYOUT_DEVICE=cpu
@@ -40,6 +42,7 @@ PY
 # Copy app files
 WORKDIR /app
 COPY service.py /app/service.py
+COPY prompts.py /app/prompts.py
 COPY glmocr.config.yaml /app/glmocr.config.yaml
 COPY benchmark_datev.py /app/benchmark_datev.py
 

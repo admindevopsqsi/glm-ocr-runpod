@@ -17,16 +17,26 @@ DEFAULT_SINGLE_IMAGE = (
 def wait_until_ready(base_url: str, timeout: int) -> dict:
     deadline = time.time() + timeout
     last_payload = {}
+    headers = request_headers()
     while time.time() < deadline:
         try:
-            response = requests.get(f"{base_url.rstrip('/')}/health", timeout=10)
-            last_payload = response.json()
-            if response.status_code == 200 and last_payload.get("ready"):
-                return last_payload
+            ping = requests.get(f"{base_url.rstrip('/')}/ping", headers=headers, timeout=10)
+            if ping.status_code == 200:
+                response = requests.get(f"{base_url.rstrip('/')}/health", headers=headers, timeout=10)
+                last_payload = response.json()
+                if response.status_code == 200 and last_payload.get("ready"):
+                    return last_payload
         except requests.RequestException:
             pass
         time.sleep(2)
     raise TimeoutError(f"Service at {base_url} did not become ready within {timeout}s. Last payload: {last_payload}")
+
+
+def request_headers() -> dict[str, str]:
+    token = os.getenv("RUNPOD_API_KEY") or os.getenv("BEARER_TOKEN")
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
 
 
 def main() -> None:
@@ -36,11 +46,13 @@ def main() -> None:
     parser.add_argument("--single-image", default=DEFAULT_SINGLE_IMAGE)
     parser.add_argument("--document")
     args = parser.parse_args()
+    headers = request_headers()
 
     print(json.dumps({"health": wait_until_ready(args.base_url, args.timeout)}, indent=2))
 
     single = requests.post(
         f"{args.base_url.rstrip('/')}/ocr/single",
+        headers=headers,
         json={"image": args.single_image},
         timeout=args.timeout,
     )
@@ -50,6 +62,7 @@ def main() -> None:
     if args.document:
         document = requests.post(
             f"{args.base_url.rstrip('/')}/glmocr/parse",
+            headers=headers,
             json={"document": args.document, "include_results": False},
             timeout=args.timeout,
         )
