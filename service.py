@@ -16,7 +16,7 @@ from typing import Any
 
 import requests
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 
 try:
@@ -641,17 +641,37 @@ async def ocr_single(request: Request) -> Response:
     if not state.vllm_ready():
         return not_ready_response(require_parser=False)
 
-    payload = read_json_body(request)
-    prompt = payload.get("prompt") or SINGLE_OCR_PROMPT
-    max_tokens = int(payload.get("max_tokens", 4096))
-    page = int(payload.get("page", 1))
-    image = payload.get("image")
-    document = payload.get("document")
-
-    if not image and not document:
-        return JSONResponse({"error": "Expected 'image' or 'document' in request body."}, status_code=400)
-
+    temp_files: list[str] = []
     try:
+        if request.headers.get("content-type", "").startswith("multipart/form-data"):
+            form = await request.form()
+            payload: dict[str, Any] = {}
+            for key in ["prompt", "max_tokens", "page"]:
+                value = form.get(key)
+                if value is not None:
+                    payload[key] = value
+            for key in ["image", "document"]:
+                file_item = form.get(key)
+                if isinstance(file_item, UploadFile) and file_item.filename:
+                    suffix = Path(file_item.filename).suffix
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                        tmp.write(await file_item.read())
+                        payload[key] = tmp.name
+                        temp_files.append(tmp.name)
+                elif isinstance(file_item, str) and file_item:
+                    payload[key] = file_item
+        else:
+            payload = read_json_body(request)
+
+        prompt = payload.get("prompt") or SINGLE_OCR_PROMPT
+        max_tokens = int(payload.get("max_tokens", 4096))
+        page = int(payload.get("page", 1))
+        image = payload.get("image")
+        document = payload.get("document")
+
+        if not image and not document:
+            return JSONResponse({"error": "Expected 'image' or 'document' in request body."}, status_code=400)
+
         if image:
             image_url = image_input_to_url(image)
             source = image
@@ -667,6 +687,12 @@ async def ocr_single(request: Request) -> Response:
     except Exception as exc:
         logger.exception("Single OCR failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
+    finally:
+        for path in temp_files:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
 
 
 @app.post("/glmocr/parse")
@@ -674,24 +700,47 @@ async def glmocr_parse(request: Request) -> Response:
     if not state.ready or state.parser is None:
         return not_ready_response()
 
-    payload = read_json_body(request)
-    documents = payload.get("documents") or payload.get("images")
-    if not documents:
-        single = payload.get("document") or payload.get("image")
-        documents = [single] if single else []
-    documents = [document for document in documents if document]
-
-    if not documents:
-        return JSONResponse({"error": "Expected 'document' or 'documents' in request body."}, status_code=400)
-
-    save_layout_visualization = bool(payload.get("save_layout_visualization", False))
-    output_dir = payload.get("output_dir")
-    include_results = bool(payload.get("include_results", True))
-
-    request_started = time.perf_counter()
-    parsed_documents: list[dict[str, Any]] = []
-
+    temp_files: list[str] = []
     try:
+        if request.headers.get("content-type", "").startswith("multipart/form-data"):
+            form = await request.form()
+            payload: dict[str, Any] = {}
+            for key in ["save_layout_visualization", "output_dir", "include_results"]:
+                value = form.get(key)
+                if value is not None:
+                    payload[key] = value
+            uploaded_docs: list[str] = []
+            for key in ["documents", "images", "document", "image"]:
+                for item in form.getlist(key):
+                    if isinstance(item, UploadFile) and item.filename:
+                        suffix = Path(item.filename).suffix
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                            tmp.write(await item.read())
+                            uploaded_docs.append(tmp.name)
+                            temp_files.append(tmp.name)
+                    elif isinstance(item, str) and item:
+                        uploaded_docs.append(item)
+            if uploaded_docs:
+                payload["documents"] = uploaded_docs
+        else:
+            payload = read_json_body(request)
+
+        documents = payload.get("documents") or payload.get("images")
+        if not documents:
+            single = payload.get("document") or payload.get("image")
+            documents = [single] if single else []
+        documents = [document for document in documents if document]
+
+        if not documents:
+            return JSONResponse({"error": "Expected 'document' or 'documents' in request body."}, status_code=400)
+
+        save_layout_visualization = str(payload.get("save_layout_visualization", "False")).lower() == "true"
+        output_dir = payload.get("output_dir")
+        include_results = str(payload.get("include_results", "True")).lower() == "true"
+
+        request_started = time.perf_counter()
+        parsed_documents: list[dict[str, Any]] = []
+
         for document in documents:
             document_started = time.perf_counter()
             result = state.parser.parse(document, save_layout_visualization=save_layout_visualization)
@@ -703,33 +752,39 @@ async def glmocr_parse(request: Request) -> Response:
                 parsed.pop("markdown_result", None)
                 parsed.pop("json_result", None)
             parsed_documents.append(parsed)
+
+        request_elapsed = time.perf_counter() - request_started
+        state.metrics.record_request(parsed_documents, request_elapsed)
+
+        total_pages = sum(document["pages"] for document in parsed_documents)
+        total_cost = sum(document["estimated_cost_usd"] for document in parsed_documents)
+        return JSONResponse(
+            {
+                "documents": parsed_documents,
+                "summary": {
+                    "mode": "document",
+                    "documents": len(parsed_documents),
+                    "pages": total_pages,
+                    "elapsed_seconds": round(request_elapsed, 3),
+                    "pages_per_second": round(total_pages / request_elapsed, 4) if request_elapsed > 0 else None,
+                    "estimated_cost_usd": round(total_cost, 6),
+                    "estimated_cost_per_1000_documents_usd": round((total_cost / len(parsed_documents)) * 1000, 4),
+                    "estimated_cost_per_1000_pages_usd": round((total_cost / total_pages) * 1000, 4)
+                    if total_pages > 0
+                    else None,
+                },
+            },
+            status_code=200,
+        )
     except Exception as exc:
         logger.exception("Document parse failed")
         return JSONResponse({"error": str(exc)}, status_code=500)
-
-    request_elapsed = time.perf_counter() - request_started
-    state.metrics.record_request(parsed_documents, request_elapsed)
-
-    total_pages = sum(document["pages"] for document in parsed_documents)
-    total_cost = sum(document["estimated_cost_usd"] for document in parsed_documents)
-    return JSONResponse(
-        {
-            "documents": parsed_documents,
-            "summary": {
-                "mode": "document",
-                "documents": len(parsed_documents),
-                "pages": total_pages,
-                "elapsed_seconds": round(request_elapsed, 3),
-                "pages_per_second": round(total_pages / request_elapsed, 4) if request_elapsed > 0 else None,
-                "estimated_cost_usd": round(total_cost, 6),
-                "estimated_cost_per_1000_documents_usd": round((total_cost / len(parsed_documents)) * 1000, 4),
-                "estimated_cost_per_1000_pages_usd": round((total_cost / total_pages) * 1000, 4)
-                if total_pages > 0
-                else None,
-            },
-        },
-        status_code=200,
-    )
+    finally:
+        for path in temp_files:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
 
 
 @app.post("/warmup")
