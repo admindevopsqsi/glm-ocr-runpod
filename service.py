@@ -441,6 +441,50 @@ def image_input_to_url(image: str) -> str:
     return f"data:{mime};base64,{base64.b64encode(data).decode()}"
 
 
+def is_pdf(value: str) -> bool:
+    if value.startswith("data:"):
+        return value.startswith("data:application/pdf")
+    if value.startswith(("http://", "https://")):
+        return value.lower().split("?")[0].endswith(".pdf")
+    return local_path_from_input(value).suffix.lower() == ".pdf"
+
+
+def decode_pdf_data_url_to_temp_file(data_url: str) -> str:
+    header, _, encoded = data_url.partition(",")
+    pdf_bytes = base64.b64decode(encoded)
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    try:
+        tmp.write(pdf_bytes)
+    finally:
+        tmp.close()
+    return tmp.name
+
+
+def download_remote_pdf_to_temp_file(url: str) -> str:
+    import httpx
+
+    with httpx.stream("GET", url, follow_redirects=True, timeout=REQUEST_TIMEOUT) as response:
+        response.raise_for_status()
+        content_type = response.headers.get("content-type", "")
+        if "pdf" not in content_type and not url.lower().split("?")[0].endswith(".pdf"):
+            raise ValueError(f"Remote URL does not appear to be a PDF (Content-Type: {content_type})")
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        try:
+            for chunk in response.iter_bytes():
+                tmp.write(chunk)
+        finally:
+            tmp.close()
+    return tmp.name
+
+
+def resolve_pdf_to_temp_file(value: str) -> str:
+    """Return a local temp file path for any PDF source (data URL, remote URL, or local path)."""
+    if value.startswith("data:"):
+        return decode_pdf_data_url_to_temp_file(value)
+    if value.startswith(("http://", "https://")):
+        return download_remote_pdf_to_temp_file(value)
+    return value
+
 
 def render_pdf_to_image_paths(document: str, page: int | None = None, dpi: int = SINGLE_OCR_PDF_DPI) -> list[str]:
     """Rasterize PDF pages to temporary PNG files.
@@ -696,8 +740,11 @@ async def ocr_single(request: Request) -> Response:
         if not image and not document:
             return JSONResponse({"error": "Expected 'image' or 'document' in request body."}, status_code=400)
 
-        if image and Path(local_path_from_input(image)).suffix.lower() == ".pdf":
-            document = image
+        if image and is_pdf(image):
+            pdf_path = resolve_pdf_to_temp_file(image)
+            if pdf_path != image:
+                temp_files.append(pdf_path)
+            document = pdf_path
             image = None
 
         if image:
@@ -772,8 +819,11 @@ async def glmocr_parse(request: Request) -> Response:
 
         expanded_docs: list[tuple[str, str]] = []
         for document in documents:
-            if local_path_from_input(document).suffix.lower() == ".pdf":
-                page_paths = render_pdf_to_image_paths(document)
+            if is_pdf(document):
+                pdf_path = resolve_pdf_to_temp_file(document)
+                if pdf_path != document:
+                    temp_files.append(pdf_path)
+                page_paths = render_pdf_to_image_paths(pdf_path)
                 temp_files.extend(page_paths)
                 for page_path in page_paths:
                     expanded_docs.append((document, page_path))
