@@ -441,21 +441,42 @@ def image_input_to_url(image: str) -> str:
     return f"data:{mime};base64,{base64.b64encode(data).decode()}"
 
 
-def render_pdf_page_to_data_url(document: str, page: int, dpi: int = SINGLE_OCR_PDF_DPI) -> str:
+
+def render_pdf_to_image_paths(document: str, page: int | None = None, dpi: int = SINGLE_OCR_PDF_DPI) -> list[str]:
+    """Rasterize PDF pages to temporary PNG files.
+
+    Args:
+        document: Path or file:// URL to the PDF.
+        page: 1-indexed page number. If None, all pages are rendered.
+        dpi: Render resolution.
+
+    Returns:
+        List of temporary PNG file paths. Caller is responsible for cleanup.
+    """
     if pdfium is None:
         raise RuntimeError("Missing dependency 'pypdfium2'. Install it in the worker image.")
 
     path = local_path_from_input(document)
     pdf = pdfium.PdfDocument(str(path))
+    image_paths: list[str] = []
     try:
-        if page < 1 or page > len(pdf):
-            raise ValueError(f"Page {page} out of range for {document}")
-        bitmap = pdf[page - 1].render(scale=dpi / 72).to_pil()
-        with tempfile.NamedTemporaryFile(suffix=".png") as tmp:
-            bitmap.save(tmp.name, format="PNG")
-            return image_input_to_url(tmp.name)
+        if page is not None:
+            if page < 1 or page > len(pdf):
+                raise ValueError(f"Page {page} out of range for {document}")
+            page_indices: list[int] = [page - 1]
+        else:
+            page_indices = list(range(len(pdf)))
+        for i in page_indices:
+            bitmap = pdf[i].render(scale=dpi / 72).to_pil()
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+            try:
+                bitmap.save(tmp.name, format="PNG")
+                image_paths.append(tmp.name)
+            finally:
+                tmp.close()
     finally:
         pdf.close()
+    return image_paths
 
 
 def build_single_ocr_payload(image_url: str, prompt: str, max_tokens: int) -> dict[str, Any]:
@@ -650,16 +671,19 @@ async def ocr_single(request: Request) -> Response:
                 value = form.get(key)
                 if value is not None:
                     payload[key] = value
-            for key in ["image", "document"]:
-                file_item = form.get(key)
+            file_keys = {"image", "document", "file"}
+            for field_name, file_item in form.multi_items():
+                if field_name not in file_keys:
+                    continue
+                resolved_key = field_name if field_name in {"image", "document"} else "image"
                 if isinstance(file_item, UploadFile) and file_item.filename:
                     suffix = Path(file_item.filename).suffix
                     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                         tmp.write(await file_item.read())
-                        payload[key] = tmp.name
+                        payload[resolved_key] = tmp.name
                         temp_files.append(tmp.name)
                 elif isinstance(file_item, str) and file_item:
-                    payload[key] = file_item
+                    payload[resolved_key] = file_item
         else:
             payload = read_json_body(request)
 
@@ -672,11 +696,17 @@ async def ocr_single(request: Request) -> Response:
         if not image and not document:
             return JSONResponse({"error": "Expected 'image' or 'document' in request body."}, status_code=400)
 
+        if image and Path(local_path_from_input(image)).suffix.lower() == ".pdf":
+            document = image
+            image = None
+
         if image:
             image_url = image_input_to_url(image)
             source = image
         else:
-            image_url = render_pdf_page_to_data_url(document, page)
+            pdf_paths = render_pdf_to_image_paths(document, page=page)
+            temp_files.extend(pdf_paths)
+            image_url = image_input_to_url(pdf_paths[0])
             source = f"{document}#page={page}"
 
         result = perform_single_ocr(image_url, prompt, max_tokens)
@@ -710,16 +740,18 @@ async def glmocr_parse(request: Request) -> Response:
                 if value is not None:
                     payload[key] = value
             uploaded_docs: list[str] = []
-            for key in ["documents", "images", "document", "image"]:
-                for item in form.getlist(key):
-                    if isinstance(item, UploadFile) and item.filename:
-                        suffix = Path(item.filename).suffix
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                            tmp.write(await item.read())
-                            uploaded_docs.append(tmp.name)
-                            temp_files.append(tmp.name)
-                    elif isinstance(item, str) and item:
-                        uploaded_docs.append(item)
+            doc_keys = {"documents", "images", "document", "image", "files", "file"}
+            for field_name, item in form.multi_items():
+                if field_name not in doc_keys:
+                    continue
+                if isinstance(item, UploadFile) and item.filename:
+                    suffix = Path(item.filename).suffix
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                        tmp.write(await item.read())
+                        uploaded_docs.append(tmp.name)
+                        temp_files.append(tmp.name)
+                elif isinstance(item, str) and item:
+                    uploaded_docs.append(item)
             if uploaded_docs:
                 payload["documents"] = uploaded_docs
         else:
@@ -738,16 +770,26 @@ async def glmocr_parse(request: Request) -> Response:
         output_dir = payload.get("output_dir")
         include_results = str(payload.get("include_results", "True")).lower() == "true"
 
+        expanded_docs: list[tuple[str, str]] = []
+        for document in documents:
+            if local_path_from_input(document).suffix.lower() == ".pdf":
+                page_paths = render_pdf_to_image_paths(document)
+                temp_files.extend(page_paths)
+                for page_path in page_paths:
+                    expanded_docs.append((document, page_path))
+            else:
+                expanded_docs.append((document, document))
+
         request_started = time.perf_counter()
         parsed_documents: list[dict[str, Any]] = []
 
-        for document in documents:
+        for source_doc, parse_target in expanded_docs:
             document_started = time.perf_counter()
-            result = state.parser.parse(document, save_layout_visualization=save_layout_visualization)
+            result = state.parser.parse(parse_target, save_layout_visualization=save_layout_visualization)
             document_elapsed = time.perf_counter() - document_started
             if output_dir:
                 save_result_if_requested(result, output_dir, save_layout_visualization)
-            parsed = build_document_response(document, result, document_elapsed)
+            parsed = build_document_response(source_doc, result, document_elapsed)
             if not include_results:
                 parsed.pop("markdown_result", None)
                 parsed.pop("json_result", None)
