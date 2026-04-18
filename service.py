@@ -16,8 +16,9 @@ from typing import Any
 
 import requests
 import uvicorn
-from fastapi import FastAPI, Request, UploadFile
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from starlette.datastructures import UploadFile
 
 try:
     import pypdfium2 as pdfium
