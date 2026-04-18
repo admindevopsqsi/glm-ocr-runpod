@@ -19,7 +19,8 @@ ENV GLMOCR_LAYOUT_DEVICE=cpu
 # Install Python 3.10 (ships with Ubuntu 22.04) and build essentials
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-venv python3-dev python3-pip \
-    git curl build-essential && \
+    git curl build-essential numactl libnuma-dev \
+    libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev && \
     rm -rf /var/lib/apt/lists/*
 
 EXPOSE 80
