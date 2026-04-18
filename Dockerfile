@@ -25,8 +25,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 EXPOSE 80
 
+# Pre-install PyTorch 2.5.1 to ensure C++ ABI compatibility with sglang-kernel
+RUN pip3 install torch==2.5.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
 # Install SGLang (alternative inference engine for faster cold starts)
-RUN pip3 install "sglang[all]" --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
+RUN pip3 install "sglang[all]" --find-links https://flashinfer.ai/whl/cu124/torch2.5/flashinfer/
 
 # Install transformers from main branch (required by GLM-OCR, needs >=5.0.0)
 RUN pip3 install git+https://github.com/huggingface/transformers.git
