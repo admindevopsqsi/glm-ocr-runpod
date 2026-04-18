@@ -18,6 +18,7 @@ import requests
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
 try:
@@ -288,53 +289,41 @@ def resolve_runtime_profile() -> dict[str, Any]:
     }
 
 
-def build_vllm_command(runtime_profile: dict[str, Any]) -> list[str]:
+def build_sglang_command(runtime_profile: dict[str, Any]) -> list[str]:
     cmd = [
         sys.executable,
         "-m",
-        "vllm.entrypoints.openai.api_server",
-        "--model",
+        "sglang.launch_server",
+        "--model-path",
         MODEL_NAME,
         "--served-model-name",
         SERVED_MODEL_NAME,
         "--port",
         "8080",
-        "--gpu-memory-utilization",
+        "--host",
+        "0.0.0.0",
+        "--mem-fraction-static",
         str(runtime_profile["gpu_memory_utilization"]),
-        "--max-model-len",
+        "--context-length",
         str(runtime_profile["max_model_len"]),
-        "--allowed-local-media-path",
-        "/",
     ]
 
     if env_flag("TRUST_REMOTE_CODE", True):
         cmd.append("--trust-remote-code")
 
-    if runtime_profile["enable_mtp"]:
-        cmd.extend(["--speculative-config.method", "mtp"])
-        cmd.extend(["--speculative-config.num_speculative_tokens", os.getenv("NUM_SPECULATIVE_TOKENS", "1")])
-
-    max_num_seqs = runtime_profile.get("max_num_seqs")
-    if max_num_seqs:
-        cmd.extend(["--max-num-seqs", str(max_num_seqs)])
-
-    limit_mm_per_prompt = os.getenv("LIMIT_MM_PER_PROMPT")
-    if limit_mm_per_prompt:
-        cmd.extend(["--limit-mm-per-prompt", limit_mm_per_prompt])
-
-    extra_args = os.getenv("VLLM_EXTRA_ARGS")
+    extra_args = os.getenv("SGLANG_EXTRA_ARGS")
     if extra_args:
         cmd.extend(extra_args.split())
 
     return cmd
 
 
-def wait_for_vllm() -> None:
+def wait_for_sglang() -> None:
     deadline = time.time() + STARTUP_TIMEOUT
     while time.time() < deadline:
         process = state.vllm_process
         if process is not None and process.poll() is not None:
-            raise RuntimeError(f"vLLM exited with code {process.returncode}")
+            raise RuntimeError(f"SGLang exited with code {process.returncode}")
         try:
             response = requests.get(f"{VLLM_HOST}/health", timeout=2)
             if response.status_code == 200:
@@ -343,7 +332,7 @@ def wait_for_vllm() -> None:
         except requests.RequestException:
             pass
         time.sleep(HEALTH_POLL_INTERVAL)
-    raise TimeoutError(f"vLLM did not become healthy within {STARTUP_TIMEOUT}s")
+    raise TimeoutError(f"SGLang did not become healthy within {STARTUP_TIMEOUT}s")
 
 
 def startup_worker() -> None:
@@ -354,11 +343,11 @@ def startup_worker() -> None:
         runtime_profile = resolve_runtime_profile()
         state.set_runtime_profile(runtime_profile)
 
-        state.set_stage("starting_vllm")
-        cmd = build_vllm_command(runtime_profile)
-        logger.info("Starting vLLM: %s", " ".join(cmd))
+        state.set_stage("starting_sglang")
+        cmd = build_sglang_command(runtime_profile)
+        logger.info("Starting SGLang: %s", " ".join(cmd))
         state.vllm_process = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr, text=True)
-        wait_for_vllm()
+        wait_for_sglang()
 
         state.set_stage("starting_glmocr")
         state.parser = GlmOcr(
@@ -752,12 +741,16 @@ async def ocr_single(request: Request) -> Response:
             image_url = image_input_to_url(image)
             source = image
         else:
-            pdf_paths = render_pdf_to_image_paths(document, page=page)
+            pdf_paths = await run_in_threadpool(
+                render_pdf_to_image_paths, document, page
+            )
             temp_files.extend(pdf_paths)
             image_url = image_input_to_url(pdf_paths[0])
             source = f"{document}#page={page}"
 
-        result = perform_single_ocr(image_url, prompt, max_tokens)
+        result = await run_in_threadpool(
+            perform_single_ocr, image_url, prompt, max_tokens
+        )
         result["source"] = source
         result["mode"] = "single"
         result["prompt"] = prompt
@@ -775,6 +768,7 @@ async def ocr_single(request: Request) -> Response:
 
 @app.post("/glmocr/parse")
 async def glmocr_parse(request: Request) -> Response:
+    overall_started = time.perf_counter()
     if not state.ready or state.parser is None:
         return not_ready_response()
 
@@ -805,6 +799,8 @@ async def glmocr_parse(request: Request) -> Response:
         else:
             payload = read_json_body(request)
 
+        http_receive_elapsed = time.perf_counter() - overall_started
+
         documents = payload.get("documents") or payload.get("images")
         if not documents:
             single = payload.get("document") or payload.get("image")
@@ -818,25 +814,32 @@ async def glmocr_parse(request: Request) -> Response:
         output_dir = payload.get("output_dir")
         include_results = str(payload.get("include_results", "True")).lower() == "true"
 
+        pdf_rasterize_elapsed = 0.0
         expanded_docs: list[tuple[str, str]] = []
         for document in documents:
             if is_pdf(document):
+                pdf_started = time.perf_counter()
                 pdf_path = resolve_pdf_to_temp_file(document)
                 if pdf_path != document:
                     temp_files.append(pdf_path)
-                page_paths = render_pdf_to_image_paths(pdf_path)
+                page_paths = await run_in_threadpool(render_pdf_to_image_paths, pdf_path)
                 temp_files.extend(page_paths)
+                pdf_rasterize_elapsed += time.perf_counter() - pdf_started
                 for page_path in page_paths:
                     expanded_docs.append((document, page_path))
             else:
                 expanded_docs.append((document, document))
 
-        request_started = time.perf_counter()
+        inference_started = time.perf_counter()
         parsed_documents: list[dict[str, Any]] = []
 
         for source_doc, parse_target in expanded_docs:
             document_started = time.perf_counter()
-            result = state.parser.parse(parse_target, save_layout_visualization=save_layout_visualization)
+            result = await run_in_threadpool(
+                state.parser.parse,
+                parse_target,
+                save_layout_visualization=save_layout_visualization
+            )
             document_elapsed = time.perf_counter() - document_started
             if output_dir:
                 save_result_if_requested(result, output_dir, save_layout_visualization)
@@ -846,8 +849,9 @@ async def glmocr_parse(request: Request) -> Response:
                 parsed.pop("json_result", None)
             parsed_documents.append(parsed)
 
-        request_elapsed = time.perf_counter() - request_started
-        state.metrics.record_request(parsed_documents, request_elapsed)
+        inference_elapsed = time.perf_counter() - inference_started
+        overall_elapsed = time.perf_counter() - overall_started
+        state.metrics.record_request(parsed_documents, inference_elapsed)
 
         total_pages = sum(document["pages"] for document in parsed_documents)
         total_cost = sum(document["estimated_cost_usd"] for document in parsed_documents)
@@ -858,13 +862,19 @@ async def glmocr_parse(request: Request) -> Response:
                     "mode": "document",
                     "documents": len(parsed_documents),
                     "pages": total_pages,
-                    "elapsed_seconds": round(request_elapsed, 3),
-                    "pages_per_second": round(total_pages / request_elapsed, 4) if request_elapsed > 0 else None,
+                    "elapsed_seconds": round(inference_elapsed, 3),
+                    "pages_per_second": round(total_pages / inference_elapsed, 4) if inference_elapsed > 0 else None,
                     "estimated_cost_usd": round(total_cost, 6),
                     "estimated_cost_per_1000_documents_usd": round((total_cost / len(parsed_documents)) * 1000, 4),
                     "estimated_cost_per_1000_pages_usd": round((total_cost / total_pages) * 1000, 4)
                     if total_pages > 0
                     else None,
+                    "timing_breakdown_seconds": {
+                        "http_receive_and_parse": round(http_receive_elapsed, 3),
+                        "pdf_rasterization": round(pdf_rasterize_elapsed, 3),
+                        "ocr_inference": round(inference_elapsed, 3),
+                        "total_request": round(overall_elapsed, 3),
+                    },
                 },
             },
             status_code=200,

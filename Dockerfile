@@ -24,8 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 EXPOSE 80
 
-# Install vLLM nightly (pip wheels built for CUDA 12.1, compatible with 12.4)
-RUN pip3 install vllm --pre --extra-index-url https://wheels.vllm.ai/nightly
+# Install SGLang (alternative inference engine for faster cold starts)
+RUN pip3 install "sglang[all]" --find-links https://flashinfer.ai/whl/cu124/torch2.4/flashinfer/
 
 # Install transformers from main branch (required by GLM-OCR, needs >=5.0.0)
 RUN pip3 install git+https://github.com/huggingface/transformers.git
