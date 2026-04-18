@@ -43,7 +43,7 @@ def test_resolve_runtime_profile_for_24gb_gpu(monkeypatch):
 
     assert profile["gpu_name"] == "RTX 4090"
     assert profile["gpu_memory_utilization"] == "0.9"
-    assert profile["max_model_len"] == "4096"
+    assert profile["max_model_len"] == "8192"
     assert profile["max_num_seqs"] == "2"
     assert profile["enable_mtp"] is True
 

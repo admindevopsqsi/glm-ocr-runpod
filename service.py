@@ -262,7 +262,7 @@ def resolve_runtime_profile() -> dict[str, Any]:
             notes.append("Using the conservative 16 GB profile.")
         elif gpu_memory_gb < 32:
             gpu_memory_utilization = gpu_memory_utilization or "0.9"
-            max_model_len = max_model_len or "4096"
+            max_model_len = max_model_len or "8192"
             max_num_seqs = max_num_seqs or "2"
             notes.append("Using the balanced 24 GB profile.")
         else:
@@ -272,7 +272,7 @@ def resolve_runtime_profile() -> dict[str, Any]:
             notes.append("Using the high-memory 32 GB+ profile.")
     else:
         gpu_memory_utilization = gpu_memory_utilization or "0.9"
-        max_model_len = max_model_len or "4096"
+        max_model_len = max_model_len or "8192"
         notes.append("GPU VRAM could not be detected; using safe defaults.")
 
     return {
