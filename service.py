@@ -260,20 +260,32 @@ def resolve_runtime_profile() -> dict[str, Any]:
             max_num_seqs = max_num_seqs or "1"
             if env_enable_mtp is None:
                 enable_mtp = False
+            speculative_num_steps = "2"
+            speculative_eagle_topk = "1"
+            speculative_num_draft_tokens = "3"
             notes.append("Using the conservative 16 GB profile.")
         elif gpu_memory_gb < 32:
             gpu_memory_utilization = gpu_memory_utilization or "0.9"
             max_model_len = max_model_len or "8192"
             max_num_seqs = max_num_seqs or "2"
+            speculative_num_steps = "3"
+            speculative_eagle_topk = "1"
+            speculative_num_draft_tokens = "4"
             notes.append("Using the balanced 24 GB profile.")
         else:
             gpu_memory_utilization = gpu_memory_utilization or "0.95"
             max_model_len = max_model_len or "16384"
             max_num_seqs = max_num_seqs or "2"
+            speculative_num_steps = "4"
+            speculative_eagle_topk = "2"
+            speculative_num_draft_tokens = "5"
             notes.append("Using the high-memory 32 GB+ profile.")
     else:
         gpu_memory_utilization = gpu_memory_utilization or "0.9"
         max_model_len = max_model_len or "8192"
+        speculative_num_steps = "3"
+        speculative_eagle_topk = "1"
+        speculative_num_draft_tokens = "4"
         notes.append("GPU VRAM could not be detected; using safe defaults.")
 
     return {
@@ -283,6 +295,9 @@ def resolve_runtime_profile() -> dict[str, Any]:
         "max_model_len": max_model_len,
         "max_num_seqs": max_num_seqs,
         "enable_mtp": enable_mtp,
+        "speculative_num_steps": speculative_num_steps,
+        "speculative_eagle_topk": speculative_eagle_topk,
+        "speculative_num_draft_tokens": speculative_num_draft_tokens,
         "layout_device": GLMOCR_LAYOUT_DEVICE,
         "min_gpu_memory_gb": MIN_GPU_MEMORY_GB,
         "notes": notes,
@@ -310,6 +325,14 @@ def build_sglang_command(runtime_profile: dict[str, Any]) -> list[str]:
 
     if env_flag("TRUST_REMOTE_CODE", True):
         cmd.append("--trust-remote-code")
+
+    if runtime_profile.get("enable_mtp"):
+        cmd.extend([
+            "--speculative-algorithm", "EAGLE",
+            "--speculative-num-steps", str(runtime_profile.get("speculative_num_steps", "3")),
+            "--speculative-eagle-topk", str(runtime_profile.get("speculative_eagle_topk", "1")),
+            "--speculative-num-draft-tokens", str(runtime_profile.get("speculative_num_draft_tokens", "4"))
+        ])
 
     extra_args = os.getenv("SGLANG_EXTRA_ARGS")
     if extra_args:
@@ -345,6 +368,10 @@ def startup_worker() -> None:
 
         state.set_stage("starting_sglang")
         cmd = build_sglang_command(runtime_profile)
+        
+        # Ensure CUDA IPC transport is enabled by default for optimal performance
+        os.environ["SGLANG_USE_CUDA_IPC_TRANSPORT"] = os.getenv("SGLANG_USE_CUDA_IPC_TRANSPORT", "true")
+        
         logger.info("Starting SGLang: %s", " ".join(cmd))
         state.vllm_process = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr, text=True)
         wait_for_sglang()
