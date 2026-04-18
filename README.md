@@ -134,7 +134,7 @@ These are the most important runtime settings:
 Runtime defaults are chosen automatically from detected VRAM:
 
 - `16-23 GB`: conservative profile, `MAX_MODEL_LEN=4096`, `MAX_NUM_SEQS=1`, `ENABLE_MTP=false`
-- `24-31 GB`: balanced profile, `MAX_MODEL_LEN=8192`, `MAX_NUM_SEQS=2`
+- `24-31 GB`: balanced profile, `MAX_MODEL_LEN=4096`, `MAX_NUM_SEQS=2`
 - `32+ GB`: high-memory profile, `MAX_MODEL_LEN=16384`, `MAX_NUM_SEQS=2`
 
 ## Docker build
